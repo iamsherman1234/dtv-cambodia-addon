@@ -20,6 +20,12 @@ Stremio manifest:
 http://127.0.0.1:7000/manifest.json
 ```
 
+Hosted manifest:
+
+```txt
+https://dtv-cambodia.sudolocal.qzz.io/manifest.json
+```
+
 ## Sources
 
 - DTVHD channels are parsed dynamically from `https://www.dtvhd.com/`.
