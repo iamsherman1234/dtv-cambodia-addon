@@ -336,6 +336,17 @@ function getXtreamSources() {
   );
 }
 
+function mediaflowProxyUrl(streamUrl) {
+  const base = (process.env.MEDIAFLOW_PROXY_URL || process.env.ULTIMATETV_MEDIAFLOW_PROXY_URL || "").replace(/\/+$/, "");
+  const password = process.env.MEDIAFLOW_PROXY_PASSWORD || process.env.MEDIAFLOW_PASSWORD || process.env.ULTIMATETV_MEDIAFLOW_PROXY_PASSWORD || "";
+  if (!base || !password || !streamUrl) return streamUrl;
+  if (streamUrl.startsWith(base + "/")) return streamUrl;
+
+  const isHls = /\.m3u8?(?:[?#]|$)/i.test(streamUrl);
+  const path = isHls ? "/proxy/hls/manifest.m3u8?d=" : "/proxy/stream?url=";
+  return base + path + encodeURIComponent(streamUrl) + "&api_password=" + encodeURIComponent(password);
+}
+
 function xtreamStreamUrl(source, streamId, containerExtension = "m3u8") {
   const server = String(source.server).replace(/\/+$/, "");
   const ext = cleanIdPart(containerExtension || "m3u8") || "m3u8";
@@ -553,12 +564,13 @@ async function route(req, res) {
     const sourceId = sourceIdParts.join(":");
     const meta = (await getMetas()).find((item) => item.id === streamMatch[1]);
     const streamUrl = source && sourceId ? await resolveStream(source, sourceId) : null;
-    const streams = streamUrl
+    const proxiedStreamUrl = streamUrl ? mediaflowProxyUrl(streamUrl) : null;
+    const streams = proxiedStreamUrl
       ? [
           {
             name: ADDON_NAME,
             title: meta?.name || sourceId,
-            url: streamUrl,
+            url: proxiedStreamUrl,
             behaviorHints: {
               notWebReady: false,
             },
