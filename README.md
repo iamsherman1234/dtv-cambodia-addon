@@ -26,6 +26,23 @@ Hosted manifest:
 https://ultimatetv.sudolocal.qzz.io/manifest.json
 ```
 
+## Catalogs
+
+UltimateTV exposes the full channel list plus category catalogs for easier TV browsing:
+
+- Sports
+- Movies
+- Kids & Cartoon
+- News
+- Music
+- Religion
+- Khmer / Cambodia
+- Bangla / Bangladesh
+- India / Hindi
+- Pakistan
+- International
+- Xtream
+
 ## Sources
 
 - DTVHD channels are parsed dynamically from `https://www.dtvhd.com/`.

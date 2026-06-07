@@ -11,7 +11,22 @@ const ADDON_LOGO =
 
 const CACHE_TTL_MS = 10 * 60 * 1000;
 const XTREAM_CACHE_TTL_MS = 15 * 60 * 1000;
-const CATALOG_IDS = new Set(["ultimate-tv", "dtv-cambodia"]);
+const CATEGORY_CATALOGS = [
+  { id: "ultimate-tv", name: "All Channels", genres: ["Live TV"] },
+  { id: "ultimate-tv-sports", name: "Sports", genres: ["Sports"] },
+  { id: "ultimate-tv-movies", name: "Movies", genres: ["Movies"] },
+  { id: "ultimate-tv-kids", name: "Kids & Cartoon", genres: ["Kids", "Cartoon"] },
+  { id: "ultimate-tv-news", name: "News", genres: ["News"] },
+  { id: "ultimate-tv-music", name: "Music", genres: ["Music"] },
+  { id: "ultimate-tv-religion", name: "Religion", genres: ["Religion"] },
+  { id: "ultimate-tv-khmer", name: "Khmer / Cambodia", genres: ["Khmer", "Cambodia"] },
+  { id: "ultimate-tv-bangla", name: "Bangla / Bangladesh", genres: ["Bangla", "Bangladesh"] },
+  { id: "ultimate-tv-india", name: "India / Hindi", genres: ["India", "Hindi"] },
+  { id: "ultimate-tv-pakistan", name: "Pakistan", genres: ["Pakistan"] },
+  { id: "ultimate-tv-international", name: "International", genres: ["International"] },
+  { id: "ultimate-tv-xtream", name: "Xtream", genres: ["Xtream"] },
+];
+const CATALOG_IDS = new Set([...CATEGORY_CATALOGS.map((catalog) => catalog.id), "dtv-cambodia"]);
 
 loadEnvFile();
 
@@ -171,6 +186,54 @@ function cleanIdPart(value) {
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "_")
     .replace(/^_+|_+$/g, "");
+}
+
+
+function textHas(text, patterns) {
+  return patterns.some((pattern) => pattern.test(text));
+}
+
+function getChannelCategories(channel) {
+  const haystack = [
+    channel.name,
+    channel.description,
+    channel.source,
+    channel.sourceId,
+    channel.url,
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+  const categories = new Set(["ultimate-tv"]);
+
+  if (channel.source === "xtream") categories.add("ultimate-tv-xtream");
+  if (["dtv", "mekong"].includes(channel.source) || textHas(haystack, [/khmer|cambodia|bayon|tvk|ctn|cnc|hang meas|rhm|mytv|ppctv|metfone|sastra|kps|apsara|dtvhd/])) categories.add("ultimate-tv-khmer");
+  if (textHas(haystack, [/sport|bein|beinsports|tsport|t-sports|willow|cricket|football|laliga|liga|premier|espn|tsn|nfl|golf|racing|real madrid|dd sports|a sports|ptv sports|fox sports|ipl|euro sports/])) categories.add("ultimate-tv-sports");
+  if (textHas(haystack, [/movie|cinema|film|bollywood|hollywood|hbo|action|moviesphere|my cinema|blackcinema|sastra|kix|cineedge/])) categories.add("ultimate-tv-movies");
+  if (textHas(haystack, [/cartoon|kids|kid|junior|disney|nickelodeon|pbs kids|tom|jerry|jungle book|buddy star|funny junior|nikky/])) categories.add("ultimate-tv-kids");
+  if (textHas(haystack, [/news|cnn|bbc world|bbc news|cctv plus|cctv|dw|cgtn|wion|al jazeera|bloomberg|rt news|republic|ndtv|somoy|jamuna|ekattor|dbc|channel 24|city news|star news/])) categories.add("ultimate-tv-news");
+  if (textHas(haystack, [/music|\bmtv\b|balle|yrf|jalwa|dance|biz music|top music|9x/])) categories.add("ultimate-tv-music");
+  if (textHas(haystack, [/islam|makkah|quran|sunnah|deen|peace tv|religion/])) categories.add("ultimate-tv-religion");
+  if (textHas(haystack, [/bangla|bangladesh|zee bangla|jalsha|boishakhi|ekushey|gazi tv|atn bangla|\bntv\b|\brtv\b|nexus tv|deepto|bijoy|desh tv|banglavision|maasranga|kolkata|ananda|ghanta|rongeen/])) categories.add("ultimate-tv-bangla");
+  if (textHas(haystack, [/india|hindi|sony sab|star sports|\bzee\b|z news|dangal|dd national|dd bangla|abp|ndtv|republic|colors bangla|colors hd|jalsha|enterr10|shemaroo|bollywood/])) categories.add("ultimate-tv-india");
+  if (textHas(haystack, [/pakistan|ary digital|geo entertainment|hum tv|aaj entertainment|ptv sports|green entertainment|green ent/])) categories.add("ultimate-tv-pakistan");
+  if (textHas(haystack, [/usa|uk|europe|world|international|earth|nature|wild|discovery|animal planet|rakuten|red bull|axs|house of crime|intelligence|xxtreme|america|american|denmark|france|germany|spain|italy|arabic|saudi/])) categories.add("ultimate-tv-international");
+
+  return [...categories];
+}
+
+function getCatalogGenres(catalogId, channel) {
+  const catalog = CATEGORY_CATALOGS.find((item) => item.id === catalogId);
+  if (!catalog || catalog.id === "ultimate-tv") {
+    return [
+      "Live TV",
+      ...getChannelCategories(channel)
+        .filter((id) => id !== "ultimate-tv")
+        .map((id) => CATEGORY_CATALOGS.find((item) => item.id === id)?.name)
+        .filter(Boolean),
+    ];
+  }
+  return catalog.genres;
 }
 
 function makeMeta(source, sourceId, name, logo, extra = {}) {
@@ -489,13 +552,16 @@ async function resolveStream(source, sourceId) {
   return null;
 }
 
-async function getMetas() {
+async function getMetas(catalogId = "ultimate-tv") {
+  const normalizedCatalogId = catalogId === "dtv-cambodia" ? "ultimate-tv" : catalogId;
   const channels = await getAllChannels();
   const seen = new Set();
   return channels
+    .filter((channel) => getChannelCategories(channel).includes(normalizedCatalogId))
     .map((channel) =>
       makeMeta(channel.source, channel.sourceId, channel.name, channel.logo, {
-        description: channel.description || `${channel.name} via ${ADDON_NAME}`,
+        description: channel.description || channel.name + " via " + ADDON_NAME,
+        genres: getCatalogGenres(normalizedCatalogId, channel),
       }),
     )
     .filter((meta) => {
@@ -515,13 +581,11 @@ function manifest() {
     background: ADDON_LOGO,
     resources: ["catalog", "meta", "stream"],
     types: ["tv"],
-    catalogs: [
-      {
-        type: "tv",
-        id: "ultimate-tv",
-        name: ADDON_NAME,
-      },
-    ],
+    catalogs: CATEGORY_CATALOGS.map((catalog) => ({
+      type: "tv",
+      id: catalog.id,
+      name: catalog.id === "ultimate-tv" ? ADDON_NAME : catalog.name,
+    })),
     behaviorHints: {
       configurable: false,
       configurationRequired: false,
@@ -547,7 +611,7 @@ async function route(req, res) {
 
   const catalogMatch = path.match(/^\/catalog\/tv\/([^/]+)\.json$/);
   if (catalogMatch && CATALOG_IDS.has(catalogMatch[1])) {
-    const metas = await getMetas();
+    const metas = await getMetas(catalogMatch[1]);
     return jsonResponse(res, 200, { metas });
   }
 
