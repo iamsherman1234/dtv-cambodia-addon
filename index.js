@@ -1,14 +1,44 @@
+const fs = require("fs");
 const http = require("http");
 const { URL } = require("url");
 
 const PORT = Number(process.env.PORT || 7000);
-const ADDON_ID = "org.dtv.cambodia";
-const ADDON_NAME = "DTV Cambodia";
+const ADDON_ID = "org.ultimate.tv";
+const ADDON_NAME = "UltimateTV";
 const ADDON_VERSION = "1.0.0";
 const ADDON_LOGO =
   "https://github.com/iamsherman1234/aria2tor/raw/refs/heads/main/raw/main/dtv.png";
 
 const CACHE_TTL_MS = 10 * 60 * 1000;
+const XTREAM_CACHE_TTL_MS = 15 * 60 * 1000;
+const CATALOG_IDS = new Set(["ultimate-tv", "dtv-cambodia"]);
+
+loadEnvFile();
+
+function loadEnvFile() {
+  const envPath = process.env.ENV_FILE || ".env";
+  if (!fs.existsSync(envPath)) return;
+
+  for (const line of fs.readFileSync(envPath, "utf8").split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    const match = trimmed.match(/^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/);
+    if (!match || process.env[match[1]] !== undefined) continue;
+    process.env[match[1]] = match[2].replace(/^(["'])(.*)\1$/, "$2");
+  }
+}
+
+function parseJsonEnv(name, fallback) {
+  const raw = process.env[name];
+  if (!raw) return fallback;
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : fallback;
+  } catch (error) {
+    console.error(`Invalid ${name}: ${error.message}`);
+    return fallback;
+  }
+}
 
 const dtvFailedNames = new Set([
   "Town HD",
@@ -211,6 +241,166 @@ async function getMekongChannels() {
   });
 }
 
+
+function parseM3u(text, sourceName = "M3U") {
+  const channels = [];
+  let pending = null;
+
+  for (const rawLine of String(text || "").split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line) continue;
+
+    if (line.startsWith("#EXTINF")) {
+      const commaIndex = line.lastIndexOf(",");
+      const name = commaIndex >= 0 ? line.slice(commaIndex + 1).trim() : "Live TV";
+      const logo = (line.match(/tvg-logo=["']([^"']+)["']/i) || [])[1] || ADDON_LOGO;
+      const group = (line.match(/group-title=["']([^"']+)["']/i) || [])[1];
+      pending = { name, logo, group };
+      continue;
+    }
+
+    if (/^https?:\/\//i.test(line)) {
+      const info = pending || { name: sourceName, logo: ADDON_LOGO };
+      channels.push({
+        name: info.name || sourceName,
+        logo: info.logo || ADDON_LOGO,
+        group: info.group,
+        url: line,
+      });
+      pending = null;
+    }
+  }
+
+  return channels;
+}
+
+function makeM3uChannels(entries, source, sourceLabel) {
+  return entries.map((channel, index) => ({
+    source,
+    sourceId: String(index + 1) + "_" + cleanIdPart(channel.name || sourceLabel),
+    name: channel.name,
+    url: channel.url,
+    logo: channel.logo || ADDON_LOGO,
+    description: channel.group ? channel.group + " via " + sourceLabel : sourceLabel,
+  }));
+}
+
+function getManualM3uChannels() {
+  const filePath = process.env.EXTRA_M3U_PATH || "manual.m3u";
+  if (!fs.existsSync(filePath)) return [];
+  const entries = parseM3u(fs.readFileSync(filePath, "utf8"), "Manual M3U");
+  return makeM3uChannels(entries, "m3u", "Manual M3U");
+}
+
+function getRemoteM3uSources() {
+  return parseJsonEnv("REMOTE_M3U_SOURCES_JSON", []).filter((source) => source && source.url);
+}
+
+async function getRemoteM3uChannels() {
+  return cached(
+    "remote-m3u",
+    async () => {
+      const results = await Promise.all(
+        getRemoteM3uSources().map(async (source, sourceIndex) => {
+          try {
+            const response = await fetchText(source.url, 20000);
+            if (!response.ok) return [];
+            return parseM3u(response.text, source.name || "Remote M3U").map((channel, index) => ({
+              source: "remote_m3u",
+              sourceId:
+                String(sourceIndex + 1) +
+                "_" +
+                String(index + 1) +
+                "_" +
+                cleanIdPart(channel.name || source.name || "remote"),
+              name: channel.name,
+              url: channel.url,
+              logo: channel.logo || ADDON_LOGO,
+              description: (source.name || "Remote M3U") + " playlist",
+            }));
+          } catch (error) {
+            console.error(`Remote M3U failed for ${source.name || source.url}: ${error.message}`);
+            return [];
+          }
+        }),
+      );
+      return results.flat();
+    },
+    CACHE_TTL_MS,
+  );
+}
+
+function getXtreamSources() {
+  return parseJsonEnv("XTREAM_SOURCES_JSON", []).filter(
+    (source) => source && source.server && source.username && source.password,
+  );
+}
+
+function xtreamStreamUrl(source, streamId, containerExtension = "m3u8") {
+  const server = String(source.server).replace(/\/+$/, "");
+  const ext = cleanIdPart(containerExtension || "m3u8") || "m3u8";
+  return (
+    server +
+    "/live/" +
+    encodeURIComponent(source.username) +
+    "/" +
+    encodeURIComponent(source.password) +
+    "/" +
+    encodeURIComponent(streamId) +
+    "." +
+    ext
+  );
+}
+
+async function getXtreamChannels() {
+  return cached(
+    "xtream",
+    async () => {
+      const results = await Promise.all(
+        getXtreamSources().map(async (source, sourceIndex) => {
+          try {
+            const server = String(source.server).replace(/\/+$/, "");
+            const api =
+              server +
+              "/player_api.php?username=" +
+              encodeURIComponent(source.username) +
+              "&password=" +
+              encodeURIComponent(source.password) +
+              "&action=get_live_streams";
+            const response = await fetchText(api, 25000);
+            if (!response.ok) return [];
+            const items = JSON.parse(response.text);
+            if (!Array.isArray(items)) return [];
+            return items
+              .filter((item) => item && item.stream_id && item.name)
+              .map((item) => ({
+                source: "xtream",
+                sourceId:
+                  String(sourceIndex + 1) +
+                  "_" +
+                  String(item.stream_id) +
+                  "_" +
+                  cleanIdPart(item.name),
+                xtreamSourceIndex: sourceIndex,
+                xtreamStreamId: String(item.stream_id),
+                xtreamExtension: item.container_extension || "m3u8",
+                name: item.name,
+                url: null,
+                logo: item.stream_icon || ADDON_LOGO,
+                description: source.name ? source.name + " Xtream" : "Xtream",
+              }));
+          } catch (error) {
+            console.error(`Xtream failed for ${source.name || source.server}: ${error.message}`);
+            return [];
+          }
+        }),
+      );
+      return results.flat();
+    },
+    XTREAM_CACHE_TTL_MS,
+  );
+}
+
 function getMan1tedChannels() {
   return man1tedChannels.map(([id, name]) => ({
     source: "man1ted",
@@ -232,8 +422,21 @@ function getStaticChannels() {
 }
 
 async function getAllChannels() {
-  const [dtv, mekong] = await Promise.all([getDtvChannels(), getMekongChannels()]);
-  return [...dtv, ...mekong, ...getMan1tedChannels(), ...getStaticChannels()];
+  const [dtv, mekong, remoteM3u, xtream] = await Promise.all([
+    getDtvChannels(),
+    getMekongChannels(),
+    getRemoteM3uChannels(),
+    getXtreamChannels(),
+  ]);
+  return [
+    ...dtv,
+    ...mekong,
+    ...getMan1tedChannels(),
+    ...getStaticChannels(),
+    ...getManualM3uChannels(),
+    ...remoteM3u,
+    ...xtream,
+  ];
 }
 
 async function resolveStream(source, sourceId) {
@@ -258,6 +461,20 @@ async function resolveStream(source, sourceId) {
     return staticStreams.find((item) => item.id === sourceId)?.url || null;
   }
 
+  if (source === "m3u") {
+    return getManualM3uChannels().find((item) => item.sourceId === sourceId)?.url || null;
+  }
+
+  if (source === "remote_m3u") {
+    return (await getRemoteM3uChannels()).find((item) => item.sourceId === sourceId)?.url || null;
+  }
+
+  if (source === "xtream") {
+    const channel = (await getXtreamChannels()).find((item) => item.sourceId === sourceId);
+    const xtreamSource = channel ? getXtreamSources()[channel.xtreamSourceIndex] : null;
+    return xtreamSource ? xtreamStreamUrl(xtreamSource, channel.xtreamStreamId, channel.xtreamExtension) : null;
+  }
+
   return null;
 }
 
@@ -267,7 +484,7 @@ async function getMetas() {
   return channels
     .map((channel) =>
       makeMeta(channel.source, channel.sourceId, channel.name, channel.logo, {
-        description: `${channel.name} via ${ADDON_NAME}`,
+        description: channel.description || `${channel.name} via ${ADDON_NAME}`,
       }),
     )
     .filter((meta) => {
@@ -282,7 +499,7 @@ function manifest() {
     id: ADDON_ID,
     version: ADDON_VERSION,
     name: ADDON_NAME,
-    description: "Cambodian live TV streams for Stremio.",
+    description: "Live TV streams for Stremio.",
     logo: ADDON_LOGO,
     background: ADDON_LOGO,
     resources: ["catalog", "meta", "stream"],
@@ -290,7 +507,7 @@ function manifest() {
     catalogs: [
       {
         type: "tv",
-        id: "dtv-cambodia",
+        id: "ultimate-tv",
         name: ADDON_NAME,
       },
     ],
@@ -317,7 +534,8 @@ async function route(req, res) {
 
   if (path === "/manifest.json") return jsonResponse(res, 200, manifest());
 
-  if (path === "/catalog/tv/dtv-cambodia.json") {
+  const catalogMatch = path.match(/^\/catalog\/tv\/([^/]+)\.json$/);
+  if (catalogMatch && CATALOG_IDS.has(catalogMatch[1])) {
     const metas = await getMetas();
     return jsonResponse(res, 200, { metas });
   }
@@ -331,7 +549,8 @@ async function route(req, res) {
 
   const streamMatch = path.match(/^\/stream\/tv\/(.+)\.json$/);
   if (streamMatch) {
-    const [source, sourceId] = streamMatch[1].split(":");
+    const [source, ...sourceIdParts] = streamMatch[1].split(":");
+    const sourceId = sourceIdParts.join(":");
     const meta = (await getMetas()).find((item) => item.id === streamMatch[1]);
     const streamUrl = source && sourceId ? await resolveStream(source, sourceId) : null;
     const streams = streamUrl
