@@ -11,6 +11,7 @@ const ADDON_LOGO =
 
 const CACHE_TTL_MS = 10 * 60 * 1000;
 const XTREAM_CACHE_TTL_MS = 15 * 60 * 1000;
+const CATALOG_PAGE_SIZE = Number(process.env.CATALOG_PAGE_SIZE || 500);
 const CATEGORY_CATALOGS = [
   { id: "ultimate-tv", name: "All Channels", genres: ["Live TV"] },
   { id: "ultimate-tv-sports", name: "Sports", genres: ["Sports"] },
@@ -234,6 +235,20 @@ function getCatalogGenres(catalogId, channel) {
     ];
   }
   return catalog.genres;
+}
+
+function parseCatalogExtra(extraPath, url) {
+  const params = new URLSearchParams(url.search);
+  if (extraPath) {
+    for (const part of extraPath.split("&")) {
+      const [key, value = ""] = part.split("=");
+      if (key) params.set(key, value);
+    }
+  }
+  return {
+    skip: Math.max(0, Number(params.get("skip") || 0) || 0),
+    search: String(params.get("search") || "").trim().toLowerCase(),
+  };
 }
 
 function makeMeta(source, sourceId, name, logo, extra = {}) {
@@ -513,62 +528,81 @@ async function getAllChannels() {
   ];
 }
 
-async function resolveStream(source, sourceId) {
+async function resolveChannel(source, sourceId) {
   if (source === "dtv") {
     const channel = (await getDtvChannels()).find((item) => item.sourceId === sourceId);
-    return channel?.url || null;
+    return channel || null;
   }
 
   if (source === "mekong") {
     const page = await fetchText(`https://www.mekongtv.net/channels/${sourceId}`);
     const src = (page.text.match(/<source\b[^>]*src="([^"]+)"/i) || [])[1];
-    return src || null;
+    return src ? { source, sourceId, name: sourceId, url: src, logo: ADDON_LOGO } : null;
   }
 
   if (source === "man1ted") {
     const api = await fetchText(`https://man1ted.com/get.php?ch=${encodeURIComponent(sourceId)}`);
     const data = JSON.parse(api.text);
-    return data?.ok && data?.stream_url ? data.stream_url : null;
+    return data?.ok && data?.stream_url ? { source, sourceId, name: sourceId, url: data.stream_url, logo: ADDON_LOGO } : null;
   }
 
   if (source === "static") {
-    return staticStreams.find((item) => item.id === sourceId)?.url || null;
+    const channel = staticStreams.find((item) => item.id === sourceId);
+    return channel ? { source, sourceId, name: channel.name, url: channel.url, logo: ADDON_LOGO } : null;
   }
 
   if (source === "m3u") {
-    return getManualM3uChannels().find((item) => item.sourceId === sourceId)?.url || null;
+    return getManualM3uChannels().find((item) => item.sourceId === sourceId) || null;
   }
 
   if (source === "remote_m3u") {
-    return (await getRemoteM3uChannels()).find((item) => item.sourceId === sourceId)?.url || null;
+    return (await getRemoteM3uChannels()).find((item) => item.sourceId === sourceId) || null;
   }
 
   if (source === "xtream") {
     const channel = (await getXtreamChannels()).find((item) => item.sourceId === sourceId);
     const xtreamSource = channel ? getXtreamSources()[channel.xtreamSourceIndex] : null;
-    return xtreamSource ? xtreamStreamUrl(xtreamSource, channel.xtreamStreamId, channel.xtreamExtension) : null;
+    return xtreamSource ? { ...channel, url: xtreamStreamUrl(xtreamSource, channel.xtreamStreamId, channel.xtreamExtension) } : null;
   }
 
   return null;
 }
 
-async function getMetas(catalogId = "ultimate-tv") {
+async function getMetas(catalogId = "ultimate-tv", options = {}) {
   const normalizedCatalogId = catalogId === "dtv-cambodia" ? "ultimate-tv" : catalogId;
+  const search = String(options.search || "").trim().toLowerCase();
+  const skip = Math.max(0, Number(options.skip || 0) || 0);
+  const limit = Math.max(1, Math.min(1000, Number(options.limit || CATALOG_PAGE_SIZE) || CATALOG_PAGE_SIZE));
   const channels = await getAllChannels();
   const seen = new Set();
-  return channels
-    .filter((channel) => getChannelCategories(channel).includes(normalizedCatalogId))
-    .map((channel) =>
-      makeMeta(channel.source, channel.sourceId, channel.name, channel.logo, {
-        description: channel.description || channel.name + " via " + ADDON_NAME,
-        genres: getCatalogGenres(normalizedCatalogId, channel),
-      }),
-    )
-    .filter((meta) => {
-      if (seen.has(meta.id)) return false;
-      seen.add(meta.id);
-      return true;
+  const metas = [];
+
+  for (const channel of channels) {
+    if (!getChannelCategories(channel).includes(normalizedCatalogId)) continue;
+    if (search && ![channel.name, channel.description, channel.source, channel.sourceId].filter(Boolean).join(" ").toLowerCase().includes(search)) continue;
+
+    const meta = makeMeta(channel.source, channel.sourceId, channel.name, channel.logo, {
+      description: channel.description || channel.name + " via " + ADDON_NAME,
+      genres: getCatalogGenres(normalizedCatalogId, channel),
     });
+    if (seen.has(meta.id)) continue;
+    seen.add(meta.id);
+    metas.push(meta);
+  }
+
+  return metas.slice(skip, skip + limit);
+}
+
+async function getMetaById(id) {
+  const [source, ...sourceIdParts] = String(id || "").split(":");
+  const sourceId = sourceIdParts.join(":");
+  if (!source || !sourceId) return null;
+  const channel = await resolveChannel(source, sourceId);
+  if (!channel) return null;
+  return makeMeta(channel.source || source, channel.sourceId || sourceId, channel.name || sourceId, channel.logo || ADDON_LOGO, {
+    description: channel.description || (channel.name || sourceId) + " via " + ADDON_NAME,
+    genres: getCatalogGenres("ultimate-tv", channel),
+  });
 }
 
 function manifest() {
@@ -585,6 +619,7 @@ function manifest() {
       type: "tv",
       id: catalog.id,
       name: catalog.id === "ultimate-tv" ? ADDON_NAME : catalog.name,
+      extraSupported: ["search", "skip"],
     })),
     behaviorHints: {
       configurable: false,
@@ -609,16 +644,16 @@ async function route(req, res) {
 
   if (path === "/manifest.json") return jsonResponse(res, 200, manifest());
 
-  const catalogMatch = path.match(/^\/catalog\/tv\/([^/]+)\.json$/);
+  const catalogMatch = path.match(/^\/catalog\/tv\/([^/]+)(?:\/([^/]+))?\.json$/);
   if (catalogMatch && CATALOG_IDS.has(catalogMatch[1])) {
-    const metas = await getMetas(catalogMatch[1]);
+    const metas = await getMetas(catalogMatch[1], parseCatalogExtra(catalogMatch[2], url));
     return jsonResponse(res, 200, { metas });
   }
 
   const metaMatch = path.match(/^\/meta\/tv\/(.+)\.json$/);
   if (metaMatch) {
     const id = metaMatch[1];
-    const meta = (await getMetas()).find((item) => item.id === id);
+    const meta = await getMetaById(id);
     return jsonResponse(res, 200, { meta: meta || null });
   }
 
@@ -626,14 +661,14 @@ async function route(req, res) {
   if (streamMatch) {
     const [source, ...sourceIdParts] = streamMatch[1].split(":");
     const sourceId = sourceIdParts.join(":");
-    const meta = (await getMetas()).find((item) => item.id === streamMatch[1]);
-    const streamUrl = source && sourceId ? await resolveStream(source, sourceId) : null;
+    const channel = source && sourceId ? await resolveChannel(source, sourceId) : null;
+    const streamUrl = channel?.url || null;
     const proxiedStreamUrl = streamUrl ? mediaflowProxyUrl(streamUrl) : null;
     const streams = proxiedStreamUrl
       ? [
           {
             name: ADDON_NAME,
-            title: meta?.name || sourceId,
+            title: channel?.name || sourceId,
             url: proxiedStreamUrl,
             behaviorHints: {
               notWebReady: false,

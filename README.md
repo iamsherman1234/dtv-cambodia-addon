@@ -43,6 +43,10 @@ UltimateTV exposes the full channel list plus category catalogs for easier TV br
 - International
 - Xtream
 
+## Performance
+
+Catalog responses are paginated to keep TV clients responsive with large providers. The default page size is `500` items and can be changed with `CATALOG_PAGE_SIZE`. Stremio clients can request more with `skip`, and all catalogs support `search`. Stream and meta lookups resolve by channel ID directly instead of rebuilding the full catalog.
+
 ## Sources
 
 - DTVHD channels are parsed dynamically from `https://www.dtvhd.com/`.
